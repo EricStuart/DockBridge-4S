@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+    <key>CFBundleDisplayName</key><string>DockBridge</string>
+    <key>CFBundleName</key><string>DockBridge</string>
+    <key>CFBundleExecutable</key><string>DockBridge</string>
+    <key>CFBundleIdentifier</key><string>local.dockbridge.app</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleVersion</key><string>0.2.5</string>
+    <key>CFBundleShortVersionString</key><string>0.2.5</string>
+    <key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
+    <key>CFBundleIconFiles</key><array><string>DockBridgeRounded</string></array>
+    <key>UIPrerenderedIcon</key><true/>
+    <key>UIDeviceFamily</key><array><integer>1</integer></array>
+    <key>MinimumOSVersion</key><string>6.0</string>
+    <key>UIRequiredDeviceCapabilities</key><array><string>armv7</string></array>
+    <key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationPortrait</string></array>
+</dict></plist>

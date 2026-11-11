@@ -1,0 +1,10 @@
+#!/bin/sh
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+if [ "$1" = configure ]; then
+    /bin/launchctl load /Library/LaunchDaemons/local.dockbridge.service.plist ||
+        echo "DockBridge service could not load. See /var/lib/dockbridge/service.log."
+    if [ -x /usr/bin/uicache ]; then
+        su mobile -c /usr/bin/uicache || echo "DockBridge icon cache refresh could not complete."
+    fi
+fi
+exit 0

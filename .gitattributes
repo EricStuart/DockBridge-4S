@@ -1,0 +1,5 @@
+* text=auto
+/control text eol=lf
+/postinst text eol=lf
+/prerm text eol=lf
+/postrm text eol=lf

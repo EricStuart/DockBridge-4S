@@ -1,0 +1,10 @@
+#!/bin/sh
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+case "$1" in
+    remove|purge)
+        if [ -x /usr/bin/uicache ]; then
+            su mobile -c /usr/bin/uicache || :
+        fi
+        ;;
+esac
+exit 0
