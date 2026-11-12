@@ -1,6 +1,6 @@
 Package: local.dockbridge
 Name: DockBridge 4S
-Version: 0.2.5
+Version: 0.2.11
 Architecture: iphoneos-arm
 Description: Bluetooth audio receiver with a Home Screen app for a jailbroken iPhone 4S
 Maintainer: DockBridge local build

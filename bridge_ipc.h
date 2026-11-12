@@ -6,6 +6,7 @@
 #define DB_STATE_DIR "/var/lib/dockbridge"
 #define DB_SOCKET_DIR "/var/lib/dockbridge-ipc"
 #define DB_SOCKET_PATH DB_SOCKET_DIR "/control.sock"
+#define DB_AUDIO_SOCKET_PATH DB_SOCKET_DIR "/audio.sock"
 #define DB_EXECUTABLE "/usr/bin/dockbridge"
 #define DB_WORKER_FD 3
 
@@ -22,8 +23,18 @@ enum {
 };
 
 enum { DB_CODEC_SBC = 1 };
+enum {
+    DB_AUDIO_PULL = 1, DB_AUDIO_STARTED_LINE_OUT, DB_AUDIO_STARTED_OTHER_ROUTE,
+    DB_AUDIO_BACKGROUNDED, DB_AUDIO_INTERRUPTED
+};
+enum { DB_AUDIO_FRAMES = 512, DB_AUDIO_CHANNELS = 2 };
+typedef struct {
+    uint32_t sample_rate;
+    uint32_t volume;
+    int16_t samples[DB_AUDIO_FRAMES * DB_AUDIO_CHANNELS];
+} db_audio_frame;
 enum { DB_HAS_POSITION = 1, DB_HAS_DURATION = 2 };
-enum { DB_MEDIA_TEXT_SIZE = 101 };
+enum { DB_MEDIA_TEXT_SIZE = 101, DB_DEVICE_NAME_SIZE = 160 };
 
 typedef struct {
     uint32_t sample_rate;
@@ -35,6 +46,8 @@ typedef struct {
     char title[DB_MEDIA_TEXT_SIZE];
     char artist[DB_MEDIA_TEXT_SIZE];
     char album[DB_MEDIA_TEXT_SIZE];
+    uint8_t device_connected;
+    char device_name[DB_DEVICE_NAME_SIZE];
 } db_media_snapshot;
 
 typedef struct {

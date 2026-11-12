@@ -9,6 +9,9 @@
 #include <unistd.h>
 #include "bridge_ipc.h"
 
+extern void dockbridge_app_audio_update(const db_reply *reply, BOOL available);
+extern void dockbridge_app_audio_backgrounded(void);
+
 static BOOL exchange(uint8_t command, db_reply *reply) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return NO;
@@ -85,7 +88,7 @@ static BOOL nativeBluetoothIsOff(void) {
 @end
 
 @interface DockBridgeController : UIViewController <UIAlertViewDelegate> {
-    UILabel *statusLabel, *detailLabel;
+    UILabel *statusLabel, *detailLabel, *deviceLabel;
     UILabel *trackTitle, *trackArtist, *trackAlbum, *trackTime, *trackFormat;
     UIView *settingsPanel, *playerPanel, *mediaCard;
     UIProgressView *trackProgress;
@@ -145,23 +148,27 @@ static BOOL nativeBluetoothIsOff(void) {
     statusLabel = [self labelAt:CGRectMake(20, 7, width - 40, 34) size:23 bold:YES];
     detailLabel = [self labelAt:CGRectMake(20, 43, width - 40, 38) size:14 bold:NO];
     statusLabel.text = @"正在连接服务";
-    startButton = [self buttonAt:85 title:@"开启蓝牙接收" action:@selector(startReceiver)];
-    stopButton = [self buttonAt:127 title:@"停止接收 · 切回系统" action:@selector(stopReceiver)];
-    pairButton = [self buttonAt:169 title:@"重新开放配对" action:@selector(openPairing)];
+    deviceLabel = [self labelAt:CGRectMake(20, 82, width - 40, 27) size:15 bold:YES];
+    deviceLabel.numberOfLines = 1;
+    deviceLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    deviceLabel.text = @"蓝牙设备 · 未连接";
+    startButton = [self buttonAt:112 title:@"开启蓝牙接收" action:@selector(startReceiver)];
+    stopButton = [self buttonAt:154 title:@"停止接收 · 切回系统" action:@selector(stopReceiver)];
+    pairButton = [self buttonAt:196 title:@"重新开放配对" action:@selector(openPairing)];
     autoSwitch = [[[UISwitch alloc] initWithFrame:CGRectZero] autorelease];
     [autoSwitch sizeToFit];
     CGRect toggle = autoSwitch.frame;
-    toggle.origin = CGPointMake(width - 22 - toggle.size.width, 213);
+    toggle.origin = CGPointMake(width - 22 - toggle.size.width, 240);
     autoSwitch.frame = toggle;
     autoSwitch.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin;
     autoSwitch.accessibilityLabel = @"开机自动开启蓝牙接收";
     autoSwitch.enabled = NO;
     [autoSwitch addTarget:self action:@selector(autoChanged) forControlEvents:UIControlEventValueChanged];
     [settingsPanel addSubview:autoSwitch];
-    UILabel *autoLabel = [self labelAt:CGRectMake(22, 211, toggle.origin.x - 30, 33) size:14 bold:NO];
+    UILabel *autoLabel = [self labelAt:CGRectMake(22, 238, toggle.origin.x - 30, 33) size:14 bold:NO];
     autoLabel.text = @"开机自动开启蓝牙接收";
     autoLabel.textAlignment = NSTextAlignmentLeft;
-    UILabel *noteLabel = [self labelAt:CGRectMake(22, 256, width - 44, 60) size:13 bold:NO];
+    UILabel *noteLabel = [self labelAt:CGRectMake(22, 283, width - 44, 60) size:13 bold:NO];
     noteLabel.text = @"保持 iPhone 插在 Bose 底座上。\n安卓从系统蓝牙选择 DockBridge 4S。";
     playerPanel = [[[UIView alloc] initWithFrame:self.view.bounds] autorelease];
     playerPanel.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
@@ -205,8 +212,8 @@ static BOOL nativeBluetoothIsOff(void) {
     timer = nil;
 }
 
-static NSString *mediaString(const char value[DB_MEDIA_TEXT_SIZE]) {
-    size_t length = strnlen(value, DB_MEDIA_TEXT_SIZE);
+static NSString *mediaString(const char *value, size_t capacity) {
+    size_t length = strnlen(value, capacity);
     NSString *text = [[[NSString alloc] initWithBytes:value length:length
                                             encoding:NSUTF8StringEncoding] autorelease];
     return [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -228,9 +235,9 @@ static NSString *mediaTime(uint32_t ms) {
 - (void)renderMedia:(const db_media_snapshot *)media visible:(BOOL)visible {
     mediaCard.hidden = !visible || !media->sample_rate || media->codec != DB_CODEC_SBC;
     if (mediaCard.hidden) return;
-    NSString *title = mediaString(media->title);
-    NSString *artist = mediaString(media->artist);
-    NSString *album = mediaString(media->album);
+    NSString *title = mediaString(media->title, sizeof(media->title));
+    NSString *artist = mediaString(media->artist, sizeof(media->artist));
+    NSString *album = mediaString(media->album, sizeof(media->album));
     BOOL hasTrack = title.length || artist.length || album.length;
     BOOL hasPosition = hasTrack && (media->timing & DB_HAS_POSITION);
     BOOL hasDuration = hasTrack && (media->timing & DB_HAS_DURATION) && media->duration_ms;
@@ -286,6 +293,14 @@ static NSString *mediaTime(uint32_t ms) {
 }
 
 - (void)render:(db_reply)reply available:(BOOL)available {
+    dockbridge_app_audio_update(&reply, available);
+    NSString *device = @"未连接";
+    if (!available) device = @"状态未知";
+    else if (reply.phase == DB_RECEIVING && reply.media.device_connected) {
+        NSString *name = mediaString(reply.media.device_name, sizeof(reply.media.device_name));
+        device = name.length ? name : @"已连接（名称未获取）";
+    }
+    deviceLabel.text = [@"蓝牙设备 · " stringByAppendingString:device];
     if (available) {
         autoMode = reply.auto_mode;
         lastPhase = reply.phase;
@@ -423,6 +438,9 @@ static NSString *mediaTime(uint32_t ms) {
     window.rootViewController = navigation;
     [window makeKeyAndVisible];
     return YES;
+}
+- (void)applicationDidEnterBackground:(UIApplication *)application {
+    dockbridge_app_audio_backgrounded();
 }
 @end
 

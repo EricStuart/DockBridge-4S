@@ -59,6 +59,10 @@ void dockbridge_report_media(const db_media_snapshot *media) {
 }
 
 extern const btstack_audio_sink_t dockbridge_audio_sink;
+extern void dockbridge_audio_tick(uint32_t now);
+extern void dockbridge_audio_interruption(void *context, UInt32 state);
+extern void dockbridge_audio_open_relay(void);
+extern void dockbridge_audio_close_relay(void);
 extern int dockbridge_start_a2dp(void);
 extern void hci_transport_h4_iphone_set_enforce_wake_device(char *path);
 
@@ -137,6 +141,9 @@ static void event_handler(uint8_t type, uint16_t channel, uint8_t *packet, uint1
                 set_pairing(0);
             }
             break;
+        case HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE:
+            dockbridge_media_device_name(packet, size);
+            break;
     }
 }
 
@@ -169,6 +176,7 @@ static void poll_state(btstack_timer_source_t *source) {
         } else if (pairing && expired(now, pair_deadline)) {
             set_pairing(0);
         }
+        dockbridge_audio_tick(now);
         dockbridge_media_tick(now);
     }
     btstack_run_loop_set_timer(source, POLL_MS);
@@ -211,7 +219,8 @@ int main(int argc, char **argv) {
     signal(SIGHUP, on_signal);
     signal(SIGUSR1, on_signal);
 
-    OSStatus status = AudioSessionInitialize(CFRunLoopGetCurrent(), kCFRunLoopDefaultMode, NULL, NULL);
+    OSStatus status = AudioSessionInitialize(CFRunLoopGetCurrent(), kCFRunLoopDefaultMode,
+                                             dockbridge_audio_interruption, NULL);
     UInt32 category = kAudioSessionCategory_MediaPlayback;
     if (!status) status = AudioSessionSetProperty(kAudioSessionProperty_AudioCategory, sizeof(category), &category);
     if (status) fprintf(stderr, "Audio session initialization: %d\n", (int)status);
@@ -241,12 +250,14 @@ int main(int argc, char **argv) {
 
     int result = hci_power_control(HCI_POWER_ON);
     if (!result) {
+        dockbridge_audio_open_relay();
         deadline = btstack_run_loop_get_time_ms() + STARTUP_MS;
         btstack_run_loop_set_timer_handler(&timer, poll_state);
         btstack_run_loop_set_timer(&timer, POLL_MS);
         btstack_run_loop_add_timer(&timer);
         btstack_run_loop_execute();
     }
+    dockbridge_audio_close_relay();
     dockbridge_audio_sink.close();
     if (took_radio) {
         hci_transport_h4_instance(NULL)->close();

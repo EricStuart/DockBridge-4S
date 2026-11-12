@@ -28,7 +28,7 @@ def toolpath(path):
 
 def patch_demo(btstack, build_dir):
     demo = (btstack / "example/a2dp_sink_demo.c").read_text()
-    demo = '#include "media_info.h"\n' + demo
+    demo = '#include "media_info.h"\n#include "sbc_queue.h"\n' + demo
     demo = demo.replace('gap_set_local_name("A2DP Sink Demo 00:00:00:00:00:00");',
                         'gap_set_local_name("DockBridge 4S");')
     demo = demo.replace("    gap_discoverable_control(1);", "")
@@ -40,21 +40,68 @@ def patch_demo(btstack, build_dir):
     demo = demo[:demo.index("int btstack_main(int argc, const char * argv[]);")]
     demo += "\nint dockbridge_start_a2dp(void) { return a2dp_and_avrcp_setup(); }\n"
     # Restrict the old demo's fixed-width audio backend to stereo modes.
-    demo = demo.replace("media_sbc_codec_capabilities[] = { 0xFF,",
-                        "media_sbc_codec_capabilities[] = { 0x33,")
-    demo = demo.replace("    sbc_frame_size = (size-pos)/ sbc_header.num_frames;", """
-    if (!media_initialized || (packet[0] >> 6) != 2 || (packet[0] & 0x3f) ||
-        sbc_header.fragmentation || !sbc_header.num_frames ||
-        (size - pos) % sbc_header.num_frames) return;
-    unsigned frame_size = (size - pos) / sbc_header.num_frames;
-    if (frame_size < 4 || frame_size > MAX_SBC_FRAME_SIZE) return;
-    for (unsigned i = 0; i < sbc_header.num_frames; ++i) {
-        if (packet[pos + i * frame_size] != 0x9c) return;
+    anchor = "media_sbc_codec_capabilities[] = {\n    0xFF,"
+    assert demo.count(anchor) == 1
+    demo = demo.replace(anchor, anchor.replace("0xFF", "0x33"))
+    start = demo.index("#define OPTIMAL_FRAMES_MIN")
+    end = demo.index("static unsigned int sbc_frame_size;", start) + len("static unsigned int sbc_frame_size;")
+    demo = demo[:start] + """static db_sbc_queue sbc_queue;
+static unsigned sbc_underruns, sbc_rejected_packets;
+static int sbc_refilling;
+""" + demo[end:]
+    start = demo.index("    // called from lower-layer but guaranteed to be on main thread")
+    end = demo.index("    // first fill from resampled audio", start)
+    demo = demo[:start] + """    if (sbc_refilling && sbc_queue.count < DB_SBC_PREFILL / 2) return;
+    sbc_refilling = 0;
+
+""" + demo[end:]
+    start = demo.index("    while (request_frames && btstack_ring_buffer_bytes_available(&sbc_frame_ring_buffer)")
+    end = demo.index("\n#ifdef STORE_TO_WAV_FILE", start)
+    demo = demo[:start] + """    while (request_frames && sbc_queue.count) {
+        db_sbc_frame *frame = dockbridge_sbc_pop(&sbc_queue);
+        btstack_sbc_decoder_process_data(&state, 0, frame->bytes, frame->length);
     }
-    if (sbc_frame_size != frame_size) {
-        btstack_ring_buffer_init(&sbc_frame_ring_buffer, sbc_frame_storage, sizeof(sbc_frame_storage));
-        sbc_frame_size = frame_size;
-    }""")
+    if (request_frames) {
+        ++sbc_underruns;
+        sbc_refilling = 1;
+    }
+""" + demo[end:]
+    demo = demo.replace(
+        "btstack_ring_buffer_init(&sbc_frame_ring_buffer, sbc_frame_storage, sizeof(sbc_frame_storage));",
+        "dockbridge_sbc_clear(&sbc_queue);")
+    demo = demo.replace("    sbc_frame_size = 0;\n", "")
+    start = demo.index("    // store sbc frame size for buffer management")
+    end = demo.index("\nstatic int read_sbc_header(", start)
+    demo = demo[:start] + """    if (!media_initialized || (packet[0] >> 6) != 2 || (packet[0] & 0x3f) ||
+        sbc_header.fragmentation || !dockbridge_sbc_push(&sbc_queue, packet + pos, size - pos, sbc_header.num_frames)) {
+        ++sbc_rejected_packets;
+        return;
+    }
+
+    // Match the sender clock without flushing audio when the encoder changes bitpool.
+    int adjustment = ((int)sbc_queue.count - DB_SBC_PREFILL) * 12;
+    if (adjustment < -1024) adjustment = -1024;
+    if (adjustment > 1024) adjustment = 1024;
+    btstack_resample_set_factor(&resample_instance, 0x10000 + adjustment);
+    if (!audio_stream_started && sbc_queue.count >= DB_SBC_PREFILL) media_processing_start();
+}
+""" + demo[end:]
+    for method in ("pause", "close"):
+        anchor = f"static void media_processing_{method}(void){{\n    if (!media_initialized) return;\n"
+        assert demo.count(anchor) == 1
+        demo = demo.replace(anchor, anchor + """    if (sbc_queue.dropped || sbc_underruns || sbc_rejected_packets) {
+        fprintf(stderr, "SBC playback: %u dropped frames, %u underruns, %u rejected packets.\\n",
+                sbc_queue.dropped, sbc_underruns, sbc_rejected_packets);
+    }
+    dockbridge_sbc_clear(&sbc_queue);
+    sbc_refilling = sbc_underruns = sbc_rejected_packets = 0;
+""")
+    anchor = "        audio->stop_stream();\n    }\n"
+    assert demo.count(anchor) == 1
+    demo = demo.replace(anchor, anchor + """    btstack_ring_buffer_reset(&decoded_audio_ring_buffer);
+    btstack_resample_init(&resample_instance, NUM_CHANNELS);
+""")
+    demo = demo.replace("int sbc_header_len = 12; // without crc", "int sbc_header_len = 1;")
     demo = demo.replace("            dump_sbc_configuration(sbc_configuration);",
                         "            dump_sbc_configuration(sbc_configuration);\n"
                         "            dockbridge_media_format(sbc_configuration.sampling_frequency,\n"
@@ -62,12 +109,25 @@ def patch_demo(btstack, build_dir):
     demo = demo.replace("            a2dp_cid = a2dp_subevent_stream_established_get_a2dp_cid(packet);",
                         "            a2dp_cid = a2dp_subevent_stream_established_get_a2dp_cid(packet);\n"
                         "            dockbridge_media_audio_connected(address);")
+    anchor = "        case A2DP_SUBEVENT_STREAM_ESTABLISHED:\n"
+    assert demo.count(anchor) == 1
+    demo = demo.replace(anchor, """        case A2DP_SUBEVENT_SIGNALING_CONNECTION_ESTABLISHED:
+            if (!a2dp_subevent_signaling_connection_established_get_status(packet)) {
+                a2dp_subevent_signaling_connection_established_get_bd_addr(packet, address);
+                dockbridge_media_device_connected(a2dp_subevent_signaling_connection_established_get_a2dp_cid(packet),
+                                                  address);
+            }
+            break;
+""" + anchor)
     for event in ("STREAM_RELEASED", "SIGNALING_CONNECTION_RELEASED"):
         anchor = f"        case A2DP_SUBEVENT_{event}:\n"
         assert demo.count(anchor) == 1
         getter = f"a2dp_subevent_{event.lower()}_get_a2dp_cid"
         demo = demo.replace(anchor, anchor + f"            if (a2dp_cid && {getter}(packet) != a2dp_cid) break;\n"
                             "            dockbridge_media_audio_disconnected();\n")
+    anchor = "        case A2DP_SUBEVENT_SIGNALING_CONNECTION_RELEASED:\n"
+    demo = demo.replace(anchor, anchor + "            dockbridge_media_device_disconnected(\n"
+                        "                a2dp_subevent_signaling_connection_released_get_a2dp_cid(packet));\n")
     demo = demo.replace("            avrcp_subevent_connection_established_get_bd_addr(packet, adress);",
                         "            avrcp_subevent_connection_established_get_bd_addr(packet, adress);\n"
                         "            dockbridge_media_avrcp_connected(local_cid, adress);")
@@ -85,6 +145,18 @@ def patch_demo(btstack, build_dir):
     demo = demo.replace("static uint8_t  avrcp_subevent_value[100];\n", "")
     target = build_dir / "a2dp_receiver.c"
     target.write_text(demo)
+    return target
+
+
+def patch_resampler(btstack, build_dir):
+    original = btstack / "src/btstack_resample.c"
+    source = original.read_text()
+    anchor = "            // store last sample\n"
+    assert source.count(anchor) == 1
+    # A fractional step can advance past the last sample of this block.
+    source = source.replace(anchor, anchor + "            index = (num_frames - 1) * context->num_channels;\n")
+    target = build_dir / original.name
+    target.write_text(source)
     return target
 
 
@@ -426,13 +498,13 @@ def main():
     posix = btstack / "platform/posix"
     cf = btstack / "platform/corefoundation"
     sbc = btstack / "3rd-party/bluedroid/decoder"
-    sources = [ROOT / "receiver.c", ROOT / "audio_queue.c", ROOT / "service.c", ROOT / "media_info.c",
+    sources = [ROOT / "receiver.c", ROOT / "audio_queue.c", ROOT / "service.c", ROOT / "media_info.c", ROOT / "sbc_queue.c",
                patch_demo(btstack, build), patch_avrcp_controller(btstack, build),
                patch_hci(btstack, build), patch_transport(btstack, build), patch_control(btstack, build),
-               patch_run_loop(btstack, build), posix / "btstack_tlv_posix.c"]
+               patch_run_loop(btstack, build), patch_resampler(btstack, build), posix / "btstack_tlv_posix.c"]
     sources += [src / (name + ".c") for name in """
         ad_parser btstack_audio btstack_linked_list btstack_memory btstack_memory_pool
-        btstack_ring_buffer btstack_resample btstack_run_loop btstack_tlv btstack_util
+        btstack_ring_buffer btstack_run_loop btstack_tlv btstack_util
         hci_cmd hci_dump l2cap l2cap_signaling
         classic/a2dp_sink classic/avdtp classic/avdtp_acceptor
         classic/avdtp_initiator classic/avdtp_sink classic/avdtp_source classic/avdtp_util
@@ -452,7 +524,7 @@ def main():
     def compile_source(index_and_source):
         index, source = index_and_source
         obj = build / f"{index:02d}-{source.stem}.o"
-        extra = ["-fblocks"] if source.name == "DockBridgeApp.m" else []
+        extra = ["-fblocks"] if source.name in ("DockBridgeApp.m", "AppAudio.m") else []
         # Keep BTstack's source names in logs without embedding the build machine's paths.
         result = subprocess.run([str(args.clang.resolve()), *flags, *extra, "-c", source.name,
                                  "-o", toolpath(obj)], cwd=source.parent, capture_output=True, text=True)
@@ -464,9 +536,12 @@ def main():
     if errors:
         raise SystemExit("\n".join(errors))
     objects = [obj for obj, _ in results]
-    app_object, app_result = compile_source((len(sources), ROOT / "DockBridgeApp.m"))
-    if app_result.returncode:
-        raise SystemExit(app_result.stdout + app_result.stderr)
+    app_objects = []
+    for index, name in enumerate(("DockBridgeApp.m", "AppAudio.m"), len(sources)):
+        app_object, app_result = compile_source((index, ROOT / name))
+        if app_result.returncode:
+            raise SystemExit(app_result.stdout + app_result.stderr)
+        app_objects.append(app_object)
     binary = build / "dockbridge"
     app = build / "dockbridge-ui"
     frameworks = args.sdk.resolve() / "System/Library/Frameworks"
@@ -497,7 +572,7 @@ def main():
         verify_signature(target)
 
     link_and_sign(binary, objects, ("Foundation", "CoreFoundation", "AudioToolbox", "IOKit"))
-    link_and_sign(app, [app_object], ("UIKit", "Foundation", "CoreFoundation", "CoreGraphics", "QuartzCore"))
+    link_and_sign(app, app_objects, ("UIKit", "Foundation", "CoreFoundation", "CoreGraphics", "QuartzCore", "AudioToolbox"))
     license_file = btstack / "LICENSE"
     if not license_file.exists():
         license_file = btstack / "LICENSE.txt"

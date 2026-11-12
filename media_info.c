@@ -3,7 +3,10 @@
 #include "btstack.h"
 #include <string.h>
 
-enum { METADATA_INTERVAL_MS = 10000, POSITION_INTERVAL_MS = 2000, QUERY_TIMEOUT_MS = 4000 };
+enum {
+    METADATA_INTERVAL_MS = 10000, POSITION_INTERVAL_MS = 2000, QUERY_TIMEOUT_MS = 4000,
+    DEVICE_NAME_REQUEST_WINDOW_MS = 12000
+};
 
 typedef struct {
     char title[DB_MEDIA_TEXT_SIZE];
@@ -14,10 +17,10 @@ typedef struct {
 
 static db_media_snapshot media, last_report;
 static pending_track pending;
-static uint8_t audio_address[6], control_address[6];
-static uint16_t control_cid;
-static int audio_connected, waiting_metadata, discard_metadata;
-static uint32_t next_metadata, next_position, metadata_deadline;
+static uint8_t audio_address[6], control_address[6], device_address[6];
+static uint16_t control_cid, device_cid;
+static int audio_connected, waiting_metadata, discard_metadata, request_device_name;
+static uint32_t next_metadata, next_position, metadata_deadline, device_name_deadline;
 
 static int has_track(void) {
     return media.title[0] || media.artist[0] || media.album[0];
@@ -44,6 +47,24 @@ static void clear_track(void) {
 static void restart_queries(void) {
     waiting_metadata = discard_metadata = 0;
     next_metadata = next_position = 0;
+}
+
+void dockbridge_media_device_connected(uint16_t cid, const uint8_t address[6]) {
+    if (media.device_connected && cid == device_cid && !memcmp(device_address, address, sizeof(device_address))) return;
+    device_cid = cid;
+    memcpy(device_address, address, sizeof(device_address));
+    media.device_connected = 1;
+    memset(media.device_name, 0, sizeof(media.device_name));
+    request_device_name = 1;
+    device_name_deadline = btstack_run_loop_get_time_ms() + DEVICE_NAME_REQUEST_WINDOW_MS;
+    report();
+}
+
+void dockbridge_media_device_disconnected(uint16_t cid) {
+    if (!media.device_connected || cid != device_cid) return;
+    media.device_connected = request_device_name = 0;
+    memset(media.device_name, 0, sizeof(media.device_name));
+    report();
 }
 
 void dockbridge_media_format(uint32_t sample_rate, uint8_t channels) {
@@ -88,8 +109,8 @@ void dockbridge_media_avrcp_disconnected(uint16_t cid) {
     report();
 }
 
-static void copy_text(char field[DB_MEDIA_TEXT_SIZE], const uint8_t *text, size_t count) {
-    if (count >= DB_MEDIA_TEXT_SIZE) count = DB_MEDIA_TEXT_SIZE - 1;
+static void copy_text(char *field, size_t capacity, const uint8_t *text, size_t count) {
+    if (count >= capacity) count = capacity - 1;
     const uint8_t *nul = memchr(text, 0, count);
     if (nul) count = (size_t)(nul - text);
     if (count) {
@@ -100,8 +121,20 @@ static void copy_text(char field[DB_MEDIA_TEXT_SIZE], const uint8_t *text, size_
                          (first & 0xf0) == 0xe0 ? 3 : (first & 0xf8) == 0xf0 ? 4 : 0;
         if (!bytes || count - lead < bytes) count = lead;
     }
-    memset(field, 0, DB_MEDIA_TEXT_SIZE);
+    memset(field, 0, capacity);
     memcpy(field, text, count);
+}
+
+void dockbridge_media_device_name(const uint8_t *packet, uint16_t size) {
+    if (!media.device_connected || size < 10 || packet[1] != size - 2 ||
+        hci_event_remote_name_request_complete_get_status(packet)) return;
+    bd_addr_t address;
+    hci_event_remote_name_request_complete_get_bd_addr(packet, address);
+    if (memcmp(device_address, address, sizeof(device_address))) return;
+    const char *name = hci_event_remote_name_request_complete_get_remote_name(packet);
+    copy_text(media.device_name, sizeof(media.device_name), (const uint8_t *)name, size - 9);
+    request_device_name = 0;
+    report();
 }
 
 static int valid_duration(uint32_t duration) {
@@ -173,9 +206,9 @@ void dockbridge_media_avrcp_event(uint8_t packet_type, const uint8_t *packet, ui
     }
     if (size < 7 || packet[6] > size - 7) return;
     switch (subevent) {
-        case AVRCP_SUBEVENT_NOW_PLAYING_TITLE_INFO: copy_text(pending.title, packet + 7, packet[6]); break;
-        case AVRCP_SUBEVENT_NOW_PLAYING_ARTIST_INFO: copy_text(pending.artist, packet + 7, packet[6]); break;
-        case AVRCP_SUBEVENT_NOW_PLAYING_ALBUM_INFO: copy_text(pending.album, packet + 7, packet[6]); break;
+        case AVRCP_SUBEVENT_NOW_PLAYING_TITLE_INFO: copy_text(pending.title, sizeof(pending.title), packet + 7, packet[6]); break;
+        case AVRCP_SUBEVENT_NOW_PLAYING_ARTIST_INFO: copy_text(pending.artist, sizeof(pending.artist), packet + 7, packet[6]); break;
+        case AVRCP_SUBEVENT_NOW_PLAYING_ALBUM_INFO: copy_text(pending.album, sizeof(pending.album), packet + 7, packet[6]); break;
     }
 }
 
@@ -184,6 +217,9 @@ static int due(uint32_t now, uint32_t deadline) {
 }
 
 void dockbridge_media_tick(uint32_t now) {
+    // Use page scan repetition mode R2 and no clock offset when inquiry data is unavailable.
+    if (request_device_name && (due(now, device_name_deadline) ||
+        gap_remote_name_request(device_address, 0x02, 0) == ERROR_CODE_SUCCESS)) request_device_name = 0;
     if (!active_control()) return;
     if (waiting_metadata) {
         if (!due(now, metadata_deadline)) return;
